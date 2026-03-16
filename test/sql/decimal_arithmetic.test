@@ -1,0 +1,53 @@
+# name: test/sql/decimal_arithmetic.test
+# description: test decimal_arithmetic extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT decimal_div(1.0, 2.0);
+----
+Catalog Error: Scalar Function with name decimal_div does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require decimal_arithmetic
+
+# Basic division
+query I
+SELECT decimal_div(10.00, 4.00)::DECIMAL(10,6);
+----
+2.500000
+
+# Result scale is max(6, s1 + p2 + 1): with s1=2, p2=3 → max(6, 2+3+1)=6
+query I
+SELECT decimal_div(DECIMAL '1.00', DECIMAL '3.000')::DECIMAL(10,6);
+----
+0.333333
+
+# Negative dividend
+query I
+SELECT decimal_div(-7.00, 2.00)::DECIMAL(10,6);
+----
+-3.500000
+
+# Division by a value less than 1
+query I
+SELECT decimal_div(1.00, 0.25)::DECIMAL(10,6);
+----
+4.000000
+
+# Division by zero raises an error
+statement error
+SELECT decimal_div(1.00, 0.00);
+----
+decimal_div: division by zero
+
+query I
+SELECT decimal_div(1::decimal(10,2), 16384::decimal(10,2));
+----
+0.0000610351562
+
+# Banker's rounding
+query I
+SELECT decimal_div(3::decimal(10,2), 16384::decimal(10,2));
+----
+0.0001831054688
