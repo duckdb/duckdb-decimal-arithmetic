@@ -4,6 +4,7 @@
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hugeint.hpp"
+#include "duckdb/common/types/decimal.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -33,25 +34,23 @@ struct DecimalDivBindData : public FunctionData {
 };
 
 //===--------------------------------------------------------------------===//
-// Execute functions — one per physical type
+// Execute functions — templated on input and result physical types.
 //
-// Each reads both inputs as INPUT_TYPE (same physical representation) and
-// computes in hugeint space to avoid overflow, writing a hugeint result into
-// the INT128 result vector (DECIMAL(38, result_scale)).
-//
-// Having a distinct function per physical type lets the bind function wire up
-// the right one so constant-folding sees consistent types end-to-end.
+// Intermediate arithmetic always happens in hugeint space to avoid overflow
+// regardless of how small the inputs are. The final quotient is then cast to
+// RESULT_TYPE, which matches the physical type of the result vector so that
+// smaller result precisions use cheaper INT32/INT64 storage.
 //===--------------------------------------------------------------------===//
 
-template <class INPUT_TYPE>
+template <class INPUT_TYPE, class RESULT_TYPE>
 static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = func_expr.bind_info->Cast<DecimalDivBindData>();
 
 	hugeint_t scale_factor = Hugeint::POWERS_OF_TEN[bind_data.scale_exp];
 
-	BinaryExecutor::Execute<INPUT_TYPE, INPUT_TYPE, hugeint_t>(
-	    args.data[0], args.data[1], result, args.size(), [&](INPUT_TYPE a, INPUT_TYPE b) -> hugeint_t {
+	BinaryExecutor::Execute<INPUT_TYPE, INPUT_TYPE, RESULT_TYPE>(
+	    args.data[0], args.data[1], result, args.size(), [&](INPUT_TYPE a, INPUT_TYPE b) -> RESULT_TYPE {
 		    if (b == INPUT_TYPE(0)) {
 			    throw InvalidInputException("decimal_div: division by zero");
 		    }
@@ -86,19 +85,38 @@ static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &r
 			    q = q + hugeint_t(1);
 		    }
 
-		    return negative ? -q : q;
+		    hugeint_t final_val = negative ? -q : q;
+		    RESULT_TYPE out;
+		    if (!Hugeint::TryCast(final_val, out)) {
+			    throw OutOfRangeException("decimal_div: result out of range for result type");
+		    }
+		    return out;
 	    });
+}
+
+// Select the execute function for a given (input physical type, result physical type) pair.
+template <class INPUT_TYPE>
+static scalar_function_t GetDecimalDivExecuteFunction(PhysicalType result_physical) {
+	switch (result_physical) {
+	case PhysicalType::INT16:
+		return DecimalDivExecute<INPUT_TYPE, int16_t>;
+	case PhysicalType::INT32:
+		return DecimalDivExecute<INPUT_TYPE, int32_t>;
+	case PhysicalType::INT64:
+		return DecimalDivExecute<INPUT_TYPE, int64_t>;
+	default:
+		return DecimalDivExecute<INPUT_TYPE, hugeint_t>;
+	}
 }
 
 //===--------------------------------------------------------------------===//
 // Bind function
 //===--------------------------------------------------------------------===//
 
-// Result precision and scale for e1 / e2:
+// Result precision and scale for e1 / e2 (SQL Server semantics):
 //   result_scale     = max(6, s1 + p2 + 1)
-//   result_precision = p1 - s1 + s2 + result_scale   (always pinned to 38 so
-//                      the result vector is always INT128, matching the hugeint
-//                      return type of every DecimalDivExecute instantiation)
+//   result_precision = p1 - s1 + s2 + result_scale
+// Both are capped at Decimal::MAX_WIDTH_DECIMAL (38).
 static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFunction &bound_function,
                                                vector<unique_ptr<Expression>> &arguments) {
 	uint8_t p1, s1, p2, s2;
@@ -108,10 +126,30 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 		throw InvalidInputException("decimal_div: both arguments must be DECIMAL");
 	}
 
-	uint8_t result_precision = p1-s1+s2 + MaxValue(6, s1+p2+1);
 	uint8_t result_scale = MaxValue<uint8_t>(6, s1 + p2 + 1);
+	uint8_t result_precision = p1 - s1 + s2 + result_scale;
 
-	// Always INT128 result so every execute instantiation shares one result type.
+	// Cap to the maximum representable decimal precision. When clamping,
+	// reduce the scale by the same amount so the integer part is preserved.
+	if (result_precision > Decimal::MAX_WIDTH_DECIMAL) {
+		result_scale -= (result_precision - Decimal::MAX_WIDTH_DECIMAL);
+		result_scale = MaxValue<uint8_t>(6, result_scale);
+		result_precision = Decimal::MAX_WIDTH_DECIMAL;
+	}
+
+	// Determine the result physical type from result_precision so the result
+	// vector uses the smallest sufficient storage type.
+	PhysicalType result_physical;
+	if (result_precision <= Decimal::MAX_WIDTH_INT16) {
+		result_physical = PhysicalType::INT16;
+	} else if (result_precision <= Decimal::MAX_WIDTH_INT32) {
+		result_physical = PhysicalType::INT32;
+	} else if (result_precision <= Decimal::MAX_WIDTH_INT64) {
+		result_physical = PhysicalType::INT64;
+	} else {
+		result_physical = PhysicalType::INT128;
+	}
+
 	bound_function.return_type = LogicalType::DECIMAL(result_precision, result_scale);
 
 	// Normalise both operands to the wider physical type so the execute
@@ -126,22 +164,22 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 	case PhysicalType::INT16:
 		bound_function.arguments[0] = LogicalType::DECIMAL(4, s1);
 		bound_function.arguments[1] = LogicalType::DECIMAL(4, s2);
-		bound_function.function = DecimalDivExecute<int16_t>;
+		bound_function.function = GetDecimalDivExecuteFunction<int16_t>(result_physical);
 		break;
 	case PhysicalType::INT32:
 		bound_function.arguments[0] = LogicalType::DECIMAL(9, s1);
 		bound_function.arguments[1] = LogicalType::DECIMAL(9, s2);
-		bound_function.function = DecimalDivExecute<int32_t>;
+		bound_function.function = GetDecimalDivExecuteFunction<int32_t>(result_physical);
 		break;
 	case PhysicalType::INT64:
 		bound_function.arguments[0] = LogicalType::DECIMAL(18, s1);
 		bound_function.arguments[1] = LogicalType::DECIMAL(18, s2);
-		bound_function.function = DecimalDivExecute<int64_t>;
+		bound_function.function = GetDecimalDivExecuteFunction<int64_t>(result_physical);
 		break;
 	case PhysicalType::INT128:
 		bound_function.arguments[0] = LogicalType::DECIMAL(38, s1);
 		bound_function.arguments[1] = LogicalType::DECIMAL(38, s2);
-		bound_function.function = DecimalDivExecute<hugeint_t>;
+		bound_function.function = GetDecimalDivExecuteFunction<hugeint_t>(result_physical);
 		break;
 	default:
 		throw InternalException("decimal_div: unexpected physical type");
@@ -158,7 +196,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto any_decimal = LogicalType(LogicalTypeId::DECIMAL);
 	// hugeint is the default; bind always overrides it before execution.
 	ScalarFunction decimal_div_func("decimal_div", {any_decimal, any_decimal}, any_decimal,
-	                                DecimalDivExecute<hugeint_t>, DecimalDivBind);
+	                                DecimalDivExecute<hugeint_t, hugeint_t>, DecimalDivBind);
 	loader.RegisterFunction(decimal_div_func);
 }
 

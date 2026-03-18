@@ -55,3 +55,8 @@ query I
 SELECT decimal_div(3::decimal(10,2), 16384::decimal(10,2));
 ----
 0.0001831054688
+
+query I
+SELECT decimal_div(3::decimal(38,2), 16384::decimal(37,2));
+----
+.000183
