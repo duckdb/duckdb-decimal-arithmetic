@@ -1,0 +1,85 @@
+# name: test/sql/decimal_avg.test
+# description: test decimal_avg aggregate — banker's rounding, NULL handling, physical type tiers
+# group: [sql]
+
+require decimal_arithmetic
+
+# Non-DECIMAL input gives a clear error (no crash)
+statement error
+SELECT decimal_avg(1::BIGINT);
+----
+decimal_avg requires a DECIMAL argument
+
+# Result type is always DECIMAL(38, scale_of_input)
+query I
+SELECT typeof(decimal_avg(v)) FROM (VALUES (1.00::DECIMAL(18,2)), (3.00::DECIMAL(18,2))) t(v);
+----
+DECIMAL(38,2)
+
+# Basic average — INT64 physical input type
+query I
+SELECT decimal_avg(v) FROM (VALUES (1.00::DECIMAL(18,2)), (3.00::DECIMAL(18,2))) t(v);
+----
+2.00
+
+# NULLs are ignored; only non-NULL rows contribute
+query I
+SELECT decimal_avg(v) FROM (VALUES (2.00::DECIMAL(18,2)), (NULL::DECIMAL(18,2)), (4.00::DECIMAL(18,2))) t(v);
+----
+3.00
+
+# All-NULL group returns NULL
+query I
+SELECT decimal_avg(v) FROM (VALUES (NULL::DECIMAL(18,2))) t(v);
+----
+NULL
+
+# Empty group (filtered to zero rows) returns NULL
+query I
+SELECT decimal_avg(v) FROM (VALUES (1.00::DECIMAL(18,2))) t(v) WHERE 1=0;
+----
+NULL
+
+# Banker's rounding: avg(0.00, 0.01) — sum=1, count=2, q=0 (even) → stay at 0.00
+query I
+SELECT decimal_avg(v) FROM (VALUES (0.00::DECIMAL(18,2)), (0.01::DECIMAL(18,2))) t(v);
+----
+0.00
+
+# Banker's rounding: avg(0.01, 0.02) — sum=3, count=2, q=1 (odd) → round up to 0.02
+query I
+SELECT decimal_avg(v) FROM (VALUES (0.01::DECIMAL(18,2)), (0.02::DECIMAL(18,2))) t(v);
+----
+0.02
+
+# Negative inputs
+query I
+SELECT decimal_avg(v) FROM (VALUES (-3.00::DECIMAL(18,2)), (1.00::DECIMAL(18,2))) t(v);
+----
+-1.00
+
+# INT16 physical input type (p≤4) — result is DECIMAL(38,2)
+query I
+SELECT decimal_avg(v) FROM (VALUES (1.00::DECIMAL(4,2)), (3.00::DECIMAL(4,2))) t(v);
+----
+2.00
+
+# INT32 physical input type (p≤9) — result is DECIMAL(38,3)
+query I
+SELECT decimal_avg(v) FROM (VALUES (100.000::DECIMAL(8,3)), (200.000::DECIMAL(8,3))) t(v);
+----
+150.000
+
+# INT128 physical input type (p>18) — result is DECIMAL(38,5)
+query I
+SELECT decimal_avg(v) FROM (VALUES (10.00000::DECIMAL(20,5)), (20.00000::DECIMAL(20,5))) t(v);
+----
+15.00000
+
+# Overflow of intermediate sum throws a clear error
+statement error
+SELECT decimal_avg(v) FROM (
+    VALUES (99999999999999999999999999999999999999::DECIMAL(38,0)),
+           (99999999999999999999999999999999999999::DECIMAL(38,0))) t(v);
+----
+decimal_avg: intermediate sum overflowed HUGEINT range

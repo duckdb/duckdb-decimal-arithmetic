@@ -5,6 +5,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hugeint.hpp"
 #include "duckdb/common/types/decimal.hpp"
+#include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -199,14 +200,185 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 }
 
 //===--------------------------------------------------------------------===//
+// decimal_avg — aggregate
+//===--------------------------------------------------------------------===//
+
+// State: running scaled-integer sum and a non-NULL row count.
+// count == 0 is the empty-group sentinel (no separate boolean needed).
+struct DecimalAvgState {
+	hugeint_t sum;   // accumulated integer value at the input's scale
+	uint64_t  count; // number of non-NULL rows accumulated so far
+};
+
+// Operation struct templated on the input physical type.
+// All arithmetic is done in hugeint space regardless of input width,
+// so even INT16 inputs accumulate without overflow until HUGEINT is exhausted.
+template <class INPUT_TYPE>
+struct DecimalAvgOperation {
+	// Tell the executor to skip NULL inputs automatically.
+	static bool IgnoreNull() {
+		return true;
+	}
+
+	static void Initialize(DecimalAvgState &state) {
+		state.sum   = hugeint_t(0);
+		state.count = 0;
+	}
+
+	// Called once per non-NULL input row.
+	// Must be a function template: the executor calls it as
+	// OP::template Operation<INPUT_TYPE, STATE, OP>(...).
+	template <class INPUT, class STATE, class OP>
+	static void Operation(STATE &state, const INPUT &input,
+	                      AggregateUnaryInput &) {
+		if (!Hugeint::TryAddInPlace(state.sum, hugeint_t(input))) {
+			throw OutOfRangeException("decimal_avg: intermediate sum overflowed HUGEINT range");
+		}
+		state.count++;
+	}
+
+	// Called when an entire vector contains the same constant value.
+	// Adds the value `count` times — equivalent to calling Operation in a loop
+	// but avoids repeated function-call overhead for large constant batches.
+	// Must be a function template: called as
+	// OP::template ConstantOperation<INPUT_TYPE, STATE, OP>(...).
+	template <class INPUT, class STATE, class OP>
+	static void ConstantOperation(STATE &state, const INPUT &input,
+	                               AggregateUnaryInput &unary_input, idx_t count) {
+		for (idx_t i = 0; i < count; i++) {
+			Operation<INPUT, STATE, OP>(state, input, unary_input);
+		}
+	}
+
+	// Merge two partial states (used in parallel / multi-threaded aggregation).
+	// Must be a function template so the executor can call it as
+	// OP::template Combine<STATE, OP>(...).
+	template <class STATE, class OP>
+	static void Combine(const STATE &source, STATE &target,
+	                    AggregateInputData &) {
+		if (!Hugeint::TryAddInPlace(target.sum, source.sum)) {
+			throw OutOfRangeException("decimal_avg: intermediate sum overflowed HUGEINT range during combine");
+		}
+		target.count += source.count;
+	}
+
+	// Produce the final result.
+	// The return type is always DECIMAL(38, s) which is physically INT128,
+	// so the result target is hugeint_t.
+	// Must be a function template: called as OP::template Finalize<RESULT, STATE>(...).
+	template <class RESULT, class STATE>
+	static void Finalize(STATE &state, RESULT &target,
+	                     AggregateFinalizeData &fd) {
+		if (state.count == 0) {
+			fd.ReturnNull();
+			return;
+		}
+
+		// Work in absolute-value space so the rounding logic is sign-agnostic,
+		// mirroring the approach used in decimal_div.
+		bool negative    = state.sum.upper < 0;
+		hugeint_t abssum = negative ? -state.sum : state.sum;
+
+		// count always fits in uint64_t — it only ever counts rows.
+		uint64_t r64;
+		hugeint_t q = Hugeint::DivModPositive(abssum, state.count, r64);
+
+		// Banker's rounding (round-half-to-even).
+		// dist = count - r is how far the remainder is from the "other half".
+		// Round up when r > dist (clearly past midpoint), or
+		//             when r == dist (exactly halfway) and q is odd.
+		uint64_t dist  = state.count - r64;
+		bool round_up  = (dist < r64) | ((dist == r64) & static_cast<bool>(q.lower & 1));
+		if (round_up) {
+			q = q + hugeint_t(1);
+		}
+
+		target = negative ? -q : q;
+	}
+};
+
+// Build the correctly-typed UnaryAggregate for a given input physical type.
+// The result is always DECIMAL(38, scale) = INT128-backed.
+template <class INPUT_TYPE>
+static AggregateFunction MakeDecimalAvgFunction(const LogicalType &input_type,
+                                                const LogicalType &return_type) {
+	return AggregateFunction::UnaryAggregate<
+	    DecimalAvgState, INPUT_TYPE, hugeint_t, DecimalAvgOperation<INPUT_TYPE>>(
+	    input_type, return_type);
+}
+
+// Bind: replace the placeholder function with a correctly-typed one for the
+// actual input DECIMAL. No FunctionData is returned — the replaced function
+// carries no bind callback, preventing any recursion.
+static unique_ptr<FunctionData> BindDecimalAvg(ClientContext &, AggregateFunction &function,
+                                               vector<unique_ptr<Expression>> &arguments) {
+	auto &input_type = arguments[0]->return_type;
+
+	// During overload resolution DuckDB may probe bind before types are fully
+	// resolved. Return nullptr for UNKNOWN so DuckDB retries after resolution.
+	if (input_type.id() == LogicalTypeId::UNKNOWN) {
+		return nullptr;
+	}
+	// Mirror decimal_div: give a clean error instead of crashing in GetScale.
+	if (input_type.id() != LogicalTypeId::DECIMAL) {
+		throw InvalidInputException("decimal_avg requires a DECIMAL argument, got %s — "
+		                            "cast the input explicitly, e.g. col::DECIMAL(18,2)",
+		                            input_type.ToString());
+	}
+
+	uint8_t scale = DecimalType::GetScale(input_type);
+	auto return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, scale);
+
+	switch (input_type.InternalType()) {
+	case PhysicalType::INT16:
+		function = MakeDecimalAvgFunction<int16_t>(
+		    LogicalType::DECIMAL(Decimal::MAX_WIDTH_INT16, scale), return_type);
+		break;
+	case PhysicalType::INT32:
+		function = MakeDecimalAvgFunction<int32_t>(
+		    LogicalType::DECIMAL(Decimal::MAX_WIDTH_INT32, scale), return_type);
+		break;
+	case PhysicalType::INT64:
+		function = MakeDecimalAvgFunction<int64_t>(
+		    LogicalType::DECIMAL(Decimal::MAX_WIDTH_INT64, scale), return_type);
+		break;
+	case PhysicalType::INT128:
+		function = MakeDecimalAvgFunction<hugeint_t>(
+		    LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, scale), return_type);
+		break;
+	default:
+		throw InternalException("decimal_avg: unexpected physical type");
+	}
+	function.name = "decimal_avg";
+	return nullptr;
+}
+
+//===--------------------------------------------------------------------===//
 // Registration
 //===--------------------------------------------------------------------===//
 static void LoadInternal(ExtensionLoader &loader) {
 	auto any_decimal = LogicalType(LogicalTypeId::DECIMAL);
-	// hugeint is the default; bind always overrides it before execution.
+
+	// decimal_div — scalar division with banker's rounding.
+	// hugeint_t is the default execute; bind always overrides before execution.
 	ScalarFunction decimal_div_func("decimal_div", {any_decimal, any_decimal}, any_decimal,
 	                                DecimalDivExecute<hugeint_t, hugeint_t>, DecimalDivBind);
 	loader.RegisterFunction(decimal_div_func);
+
+	// decimal_avg — aggregate average with banker's rounding.
+	// hugeint_t is used as the placeholder type for all callbacks; BindDecimalAvg
+	// replaces the whole function with the correctly-typed one before any rows
+	// are processed, so these placeholders are never actually called.
+	AggregateFunction decimal_avg_func(
+	    "decimal_avg", {any_decimal}, any_decimal,
+	    AggregateFunction::StateSize<DecimalAvgState>,
+	    AggregateFunction::StateInitialize<DecimalAvgState, DecimalAvgOperation<hugeint_t>>,
+	    AggregateFunction::UnaryScatterUpdate<DecimalAvgState, hugeint_t, DecimalAvgOperation<hugeint_t>>,
+	    AggregateFunction::StateCombine<DecimalAvgState, DecimalAvgOperation<hugeint_t>>,
+	    AggregateFunction::StateFinalize<DecimalAvgState, hugeint_t, DecimalAvgOperation<hugeint_t>>,
+	    nullptr,  // simple_update
+	    BindDecimalAvg);
+	loader.RegisterFunction(decimal_avg_func);
 }
 
 void DecimalArithmeticExtension::Load(ExtensionLoader &loader) {
