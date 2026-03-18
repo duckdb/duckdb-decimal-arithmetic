@@ -120,7 +120,6 @@ static scalar_function_t GetDecimalDivExecuteFunction(PhysicalType result_physic
 static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFunction &bound_function,
                                                vector<unique_ptr<Expression>> &arguments) {
 	uint8_t p1, s1, p2, s2;
-
 	if (!arguments[0]->return_type.GetDecimalProperties(p1, s1) ||
 	    !arguments[1]->return_type.GetDecimalProperties(p2, s2)) {
 		throw InvalidInputException("decimal_div: both arguments must be DECIMAL");
@@ -129,10 +128,20 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 	uint8_t result_scale = MaxValue<uint8_t>(6, s1 + p2 + 1);
 	uint8_t result_precision = p1 - s1 + s2 + result_scale;
 
-	// Cap to the maximum representable decimal precision. When clamping,
-	// reduce the scale by the same amount so the integer part is preserved.
+	// Cap to the maximum representable decimal precision (38). When the
+	// formula yields a precision above 38 we reduce the scale by the same
+	// amount so the integer part is preserved, then floor scale at 6.
 	if (result_precision > Decimal::MAX_WIDTH_DECIMAL) {
-		result_scale -= (result_precision - Decimal::MAX_WIDTH_DECIMAL);
+		uint8_t excess = result_precision - Decimal::MAX_WIDTH_DECIMAL;
+
+		// Guard against uint8_t underflow: excess can be larger than
+		// result_scale (e.g. p1=38,s1=0,s2=5 gives excess=26, scale=21).
+		// In that case clamp to 0 before applying the minimum-scale floor.
+		if (excess <= result_scale) {
+			result_scale -= excess;
+		} else {
+			result_scale = 0;
+		}
 		result_scale = MaxValue<uint8_t>(6, result_scale);
 		result_precision = Decimal::MAX_WIDTH_DECIMAL;
 	}
