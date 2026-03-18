@@ -108,10 +108,11 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 		throw InvalidInputException("decimal_div: both arguments must be DECIMAL");
 	}
 
+	uint8_t result_precision = p1-s1+s2 + MaxValue(6, s1+p2+1);
 	uint8_t result_scale = MaxValue<uint8_t>(6, s1 + p2 + 1);
 
 	// Always INT128 result so every execute instantiation shares one result type.
-	bound_function.return_type = LogicalType::DECIMAL(38, result_scale);
+	bound_function.return_type = LogicalType::DECIMAL(result_precision, result_scale);
 
 	// Normalise both operands to the wider physical type so the execute
 	// function sees consistent physical types.  The max-precision value for
