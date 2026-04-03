@@ -83,7 +83,7 @@ static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &r
 		    hugeint_t dist = abs_div - r;
 		    // bool round_up = (dist < r) | ((dist == r) & (bool)(q.lower & 1));
 		    // if (round_up) {
-			//    q = q + hugeint_t(1);
+		    //    q = q + hugeint_t(1);
 		    // }
 
 		    hugeint_t final_val = negative ? -q : q;
