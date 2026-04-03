@@ -5,6 +5,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hugeint.hpp"
 #include "duckdb/common/types/decimal.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -345,6 +346,180 @@ static unique_ptr<FunctionData> BindDecimalAvg(ClientContext &, AggregateFunctio
 }
 
 //===--------------------------------------------------------------------===//
+// Rounding scalar functions: round_ceil, round_floor, round_up, round_down
+//===--------------------------------------------------------------------===//
+
+struct DecimalRoundBindData : public FunctionData {
+	int32_t target_scale; // requested output scale s
+	int32_t shift;        // input_scale - target_scale; > 0 means divide-and-round
+
+	DecimalRoundBindData(int32_t ts, int32_t sh) : target_scale(ts), shift(sh) {
+	}
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<DecimalRoundBindData>(target_scale, shift);
+	}
+
+	bool Equals(const FunctionData &other) const override {
+		auto &o = other.Cast<DecimalRoundBindData>();
+		return target_scale == o.target_scale && shift == o.shift;
+	}
+};
+
+// Round towards +inf: positive remainder bumps up; negative remainder truncates.
+struct CeilRoundOp {
+	static hugeint_t Apply(hugeint_t q, bool has_rem, bool negative) {
+		if (has_rem && !negative) {
+			q = q + hugeint_t(1);
+		}
+		return negative ? -q : q;
+	}
+};
+
+// Round towards -inf: negative remainder bumps abs up; positive remainder truncates.
+struct FloorRoundOp {
+	static hugeint_t Apply(hugeint_t q, bool has_rem, bool negative) {
+		if (has_rem && negative) {
+			q = q + hugeint_t(1);
+		}
+		return negative ? -q : q;
+	}
+};
+
+// Round away from zero: any remainder bumps abs up.
+struct UpRoundOp {
+	static hugeint_t Apply(hugeint_t q, bool has_rem, bool negative) {
+		if (has_rem) {
+			q = q + hugeint_t(1);
+		}
+		return negative ? -q : q;
+	}
+};
+
+// Round towards zero (truncate): discard remainder.
+struct DownRoundOp {
+	static hugeint_t Apply(hugeint_t q, bool /*has_rem*/, bool negative) {
+		return negative ? -q : q;
+	}
+};
+
+template <class T, class ROUND_OP>
+static void DecimalRoundExecute(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	auto &bind_data = func_expr.bind_info->Cast<DecimalRoundBindData>();
+	int32_t shift = bind_data.shift;
+
+	UnaryExecutor::Execute<T, T>(args.data[0], result, args.size(), [&](T input_raw) -> T {
+		if (shift == 0) {
+			return input_raw;
+		}
+
+		hugeint_t input = hugeint_t(input_raw);
+		bool negative = input.upper < 0;
+		hugeint_t abs_input = negative ? -input : input;
+
+		hugeint_t q;
+		bool has_rem;
+
+		// shift > 0: divide abs by 10^shift, then apply rounding operator.
+		// shift < 0 (target_scale > input_scale): rejected at bind time.
+		hugeint_t power = Hugeint::POWERS_OF_TEN[shift];
+		hugeint_t r;
+		if (power.upper == 0) {
+			uint64_t r64;
+			q = Hugeint::DivModPositive(abs_input, power.lower, r64);
+			r.upper = 0;
+			r.lower = r64;
+		} else {
+			q = Hugeint::DivMod(abs_input, power, r);
+		}
+		has_rem = (r != hugeint_t(0));
+
+		hugeint_t final_val = ROUND_OP::Apply(q, has_rem, negative);
+
+		// For negative target_scale the output DECIMAL has scale 0.
+		// The stored integer must represent the actual value, so multiply
+		// back by 10^|target_scale| to restore the discarded integer digits.
+		if (bind_data.target_scale < 0) {
+			final_val = final_val * Hugeint::POWERS_OF_TEN[-bind_data.target_scale];
+		}
+
+		T out;
+		if (!Hugeint::TryCast(final_val, out)) {
+			throw OutOfRangeException("round: result out of range for result type");
+		}
+		return out;
+	});
+}
+
+template <class ROUND_OP>
+static scalar_function_t GetDecimalRoundFunction(PhysicalType physical) {
+	switch (physical) {
+	case PhysicalType::INT16:
+		return DecimalRoundExecute<int16_t, ROUND_OP>;
+	case PhysicalType::INT32:
+		return DecimalRoundExecute<int32_t, ROUND_OP>;
+	case PhysicalType::INT64:
+		return DecimalRoundExecute<int64_t, ROUND_OP>;
+	default:
+		return DecimalRoundExecute<hugeint_t, ROUND_OP>;
+	}
+}
+
+template <class ROUND_OP>
+static unique_ptr<FunctionData> DecimalRoundBind(ClientContext &context, ScalarFunction &bound_function,
+                                                  vector<unique_ptr<Expression>> &arguments) {
+	auto &input_type = arguments[0]->return_type;
+
+	if (input_type.id() == LogicalTypeId::UNKNOWN) {
+		return nullptr; // retry after type resolution
+	}
+	if (input_type.id() != LogicalTypeId::DECIMAL) {
+		throw InvalidInputException("%s: first argument must be DECIMAL, got %s", bound_function.name,
+		                            input_type.ToString());
+	}
+	if (!arguments[1]->IsFoldable()) {
+		throw NotImplementedException("%s: scale argument must be a constant integer", bound_function.name);
+	}
+
+	Value scale_val = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
+	if (scale_val.IsNull()) {
+		throw InvalidInputException("%s: scale argument must not be NULL", bound_function.name);
+	}
+	int32_t target_scale = scale_val.GetValue<int32_t>();
+
+	uint8_t p, input_scale_u8;
+	input_type.GetDecimalProperties(p, input_scale_u8);
+	int32_t input_scale = int32_t(input_scale_u8);
+	int32_t shift = input_scale - target_scale;
+
+	if (target_scale > input_scale) {
+		throw NotImplementedException(
+		    "%s: target scale %d exceeds input scale %d; cast to a higher-precision DECIMAL first",
+		    bound_function.name, target_scale, input_scale);
+	}
+	// shift must fit in the POWERS_OF_TEN table (indices 0..38).
+	if (shift > int32_t(Hugeint::CACHED_POWERS_OF_TEN - 1)) {
+		throw InvalidInputException("%s: shift of %d from DECIMAL(?,  %d) to scale %d exceeds maximum of %d",
+		                            bound_function.name, shift, input_scale, target_scale,
+		                            Hugeint::CACHED_POWERS_OF_TEN - 1);
+	}
+	// For negative target_scale the multiply-back factor must also be in range.
+	if (target_scale < 0 && -target_scale > int32_t(Hugeint::CACHED_POWERS_OF_TEN - 1)) {
+		throw InvalidInputException("%s: target scale %d is too negative (minimum %d)", bound_function.name,
+		                            target_scale, -int32_t(Hugeint::CACHED_POWERS_OF_TEN - 1));
+	}
+
+	// Output scale: DECIMAL requires scale >= 0, so clamp at 0 for negative target.
+	uint8_t result_scale = target_scale < 0 ? 0 : uint8_t(target_scale);
+	bound_function.return_type = LogicalType::DECIMAL(p, result_scale);
+	bound_function.arguments[0] = input_type;
+	bound_function.function = GetDecimalRoundFunction<ROUND_OP>(input_type.InternalType());
+
+	return make_uniq<DecimalRoundBindData>(target_scale, shift);
+}
+
+//===--------------------------------------------------------------------===//
 // Registration
 //===--------------------------------------------------------------------===//
 static void LoadInternal(ExtensionLoader &loader) {
@@ -369,6 +544,27 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    nullptr, // simple_update
 	    BindDecimalAvg);
 	loader.RegisterFunction(decimal_avg_func);
+
+	// round_ceil / round_floor / round_up / round_down — directional rounding scalars.
+	// The second argument (scale) must be a constant integer; bind selects the execute
+	// function for the actual input physical type.
+	auto round_args = vector<LogicalType> {any_decimal, LogicalType::INTEGER};
+
+	ScalarFunction round_ceil_func("round_ceil", round_args, any_decimal,
+	                               DecimalRoundExecute<hugeint_t, CeilRoundOp>, DecimalRoundBind<CeilRoundOp>);
+	loader.RegisterFunction(round_ceil_func);
+
+	ScalarFunction round_floor_func("round_floor", round_args, any_decimal,
+	                                DecimalRoundExecute<hugeint_t, FloorRoundOp>, DecimalRoundBind<FloorRoundOp>);
+	loader.RegisterFunction(round_floor_func);
+
+	ScalarFunction round_up_func("round_up", round_args, any_decimal,
+	                             DecimalRoundExecute<hugeint_t, UpRoundOp>, DecimalRoundBind<UpRoundOp>);
+	loader.RegisterFunction(round_up_func);
+
+	ScalarFunction round_down_func("round_down", round_args, any_decimal,
+	                               DecimalRoundExecute<hugeint_t, DownRoundOp>, DecimalRoundBind<DownRoundOp>);
+	loader.RegisterFunction(round_down_func);
 }
 
 void DecimalArithmeticExtension::Load(ExtensionLoader &loader) {

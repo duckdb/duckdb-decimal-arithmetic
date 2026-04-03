@@ -1,0 +1,212 @@
+# name: test/sql/decimal_round.test
+# description: test round_ceil, round_floor, round_up, round_down scalar functions
+# group: [sql]
+
+require decimal_arithmetic
+
+# --- round_ceil: towards +inf ---
+
+query I
+SELECT round_ceil(1.231::DECIMAL(10,3), 2);
+----
+1.24
+
+query I
+SELECT round_ceil(-1.231::DECIMAL(10,3), 2);
+----
+-1.23
+
+# Exact (no remainder): no bump
+query I
+SELECT round_ceil(1.230::DECIMAL(10,3), 2);
+----
+1.23
+
+# Same scale: no-op
+query I
+SELECT round_ceil(1.23::DECIMAL(10,2), 2);
+----
+1.23
+
+# Scale 0 (round to integer)
+query I
+SELECT round_ceil(1.9::DECIMAL(10,1), 0);
+----
+2
+
+query I
+SELECT round_ceil(-1.9::DECIMAL(10,1), 0);
+----
+-1
+
+# Negative target scale (round to nearest 10)
+query I
+SELECT round_ceil(1234.56::DECIMAL(10,2), -1);
+----
+1240
+
+# --- round_floor: towards -inf ---
+
+query I
+SELECT round_floor(1.239::DECIMAL(10,3), 2);
+----
+1.23
+
+query I
+SELECT round_floor(-1.231::DECIMAL(10,3), 2);
+----
+-1.24
+
+# Exact (no remainder): no bump
+query I
+SELECT round_floor(1.230::DECIMAL(10,3), 2);
+----
+1.23
+
+query I
+SELECT round_floor(-1.230::DECIMAL(10,3), 2);
+----
+-1.23
+
+# Scale 0
+query I
+SELECT round_floor(1.9::DECIMAL(10,1), 0);
+----
+1
+
+query I
+SELECT round_floor(-1.1::DECIMAL(10,1), 0);
+----
+-2
+
+# Negative target scale
+query I
+SELECT round_floor(1239.99::DECIMAL(10,2), -1);
+----
+1230
+
+# --- round_up: away from zero ---
+
+query I
+SELECT round_up(1.231::DECIMAL(10,3), 2);
+----
+1.24
+
+query I
+SELECT round_up(-1.231::DECIMAL(10,3), 2);
+----
+-1.24
+
+# Exact: no bump
+query I
+SELECT round_up(1.230::DECIMAL(10,3), 2);
+----
+1.23
+
+query I
+SELECT round_up(-1.230::DECIMAL(10,3), 2);
+----
+-1.23
+
+# Scale 0
+query I
+SELECT round_up(1.1::DECIMAL(10,1), 0);
+----
+2
+
+query I
+SELECT round_up(-1.1::DECIMAL(10,1), 0);
+----
+-2
+
+# Negative target scale
+query I
+SELECT round_up(1231.00::DECIMAL(10,2), -1);
+----
+1240
+
+query I
+SELECT round_up(-1231.00::DECIMAL(10,2), -1);
+----
+-1240
+
+# --- round_down: towards zero (truncate) ---
+
+query I
+SELECT round_down(1.239::DECIMAL(10,3), 2);
+----
+1.23
+
+query I
+SELECT round_down(-1.239::DECIMAL(10,3), 2);
+----
+-1.23
+
+# Exact: no change
+query I
+SELECT round_down(1.230::DECIMAL(10,3), 2);
+----
+1.23
+
+# Scale 0
+query I
+SELECT round_down(1.9::DECIMAL(10,1), 0);
+----
+1
+
+query I
+SELECT round_down(-1.9::DECIMAL(10,1), 0);
+----
+-1
+
+# Negative target scale
+query I
+SELECT round_down(1239.99::DECIMAL(10,2), -1);
+----
+1230
+
+query I
+SELECT round_down(-1239.99::DECIMAL(10,2), -1);
+----
+-1230
+
+# --- Type preservation: output scale matches requested scale ---
+
+query I
+SELECT typeof(round_ceil(1.231::DECIMAL(10,3), 2));
+----
+DECIMAL(10,2)
+
+query I
+SELECT typeof(round_floor(1.231::DECIMAL(10,3), 2));
+----
+DECIMAL(10,2)
+
+query I
+SELECT typeof(round_up(1.231::DECIMAL(10,3), 2));
+----
+DECIMAL(10,2)
+
+query I
+SELECT typeof(round_down(1.231::DECIMAL(10,3), 2));
+----
+DECIMAL(10,2)
+
+# --- NULL passthrough ---
+
+query I
+SELECT round_ceil(NULL::DECIMAL(10,3), 2);
+----
+NULL
+
+query I
+SELECT round_floor(NULL::DECIMAL(10,3), 2);
+----
+NULL
+
+# --- Error: target scale exceeds input scale ---
+
+statement error
+SELECT round_ceil(1.23::DECIMAL(10,2), 3);
+----
+target scale 3 exceeds input scale 2
