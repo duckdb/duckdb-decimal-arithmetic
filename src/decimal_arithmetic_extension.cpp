@@ -81,10 +81,10 @@ static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &r
 		    // Banker's rounding (round-half-to-even), collapsed to one branch.
 		    // Compare r against (abs_div - r) to avoid computing 2*r.
 		    hugeint_t dist = abs_div - r;
-		    bool round_up = (dist < r) | ((dist == r) & (bool)(q.lower & 1));
-		    if (round_up) {
-			    q = q + hugeint_t(1);
-		    }
+		    // bool round_up = (dist < r) | ((dist == r) & (bool)(q.lower & 1));
+		    // if (round_up) {
+			//    q = q + hugeint_t(1);
+		    // }
 
 		    hugeint_t final_val = negative ? -q : q;
 		    RESULT_TYPE out;

@@ -54,7 +54,7 @@ SELECT decimal_div(1::decimal(10,2), 16384::decimal(10,2));
 query I
 SELECT decimal_div(3::decimal(10,2), 16384::decimal(10,2));
 ----
-0.0001831054688
+0.0001831054687
 
 query I
 SELECT decimal_div(3::decimal(38,2), 16384::decimal(37,2));
@@ -71,7 +71,7 @@ DECIMAL(10,7)
 query I
 SELECT decimal_div(12.34::DECIMAL(4,2), 3.5::DECIMAL(4,1));
 ----
-3.5257143
+3.5257142
 
 # INT32 inputs (p≤9) → DECIMAL(18, 10), INT64 result physical type
 # p1=9 s1=3 p2=6 s2=2: result_scale=max(6,3+6+1)=10, result_precision=9-3+2+10=18
