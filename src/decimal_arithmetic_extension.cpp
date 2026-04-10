@@ -468,7 +468,7 @@ static scalar_function_t GetDecimalRoundFunction(PhysicalType physical) {
 
 template <class ROUND_OP>
 static unique_ptr<FunctionData> DecimalRoundBind(ClientContext &context, ScalarFunction &bound_function,
-                                                  vector<unique_ptr<Expression>> &arguments) {
+                                                 vector<unique_ptr<Expression>> &arguments) {
 	auto &input_type = arguments[0]->return_type;
 
 	if (input_type.id() == LogicalTypeId::UNKNOWN) {
@@ -495,8 +495,8 @@ static unique_ptr<FunctionData> DecimalRoundBind(ClientContext &context, ScalarF
 
 	if (target_scale > input_scale) {
 		throw NotImplementedException(
-		    "%s: target scale %d exceeds input scale %d; cast to a higher-precision DECIMAL first",
-		    bound_function.name, target_scale, input_scale);
+		    "%s: target scale %d exceeds input scale %d; cast to a higher-precision DECIMAL first", bound_function.name,
+		    target_scale, input_scale);
 	}
 	// shift must fit in the POWERS_OF_TEN table (indices 0..38).
 	if (shift > int32_t(Hugeint::CACHED_POWERS_OF_TEN - 1)) {
@@ -550,20 +550,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// function for the actual input physical type.
 	auto round_args = vector<LogicalType> {any_decimal, LogicalType::INTEGER};
 
-	ScalarFunction round_ceil_func("round_ceil", round_args, any_decimal,
-	                               DecimalRoundExecute<hugeint_t, CeilRoundOp>, DecimalRoundBind<CeilRoundOp>);
+	ScalarFunction round_ceil_func("round_ceil", round_args, any_decimal, DecimalRoundExecute<hugeint_t, CeilRoundOp>,
+	                               DecimalRoundBind<CeilRoundOp>);
 	loader.RegisterFunction(round_ceil_func);
 
 	ScalarFunction round_floor_func("round_floor", round_args, any_decimal,
 	                                DecimalRoundExecute<hugeint_t, FloorRoundOp>, DecimalRoundBind<FloorRoundOp>);
 	loader.RegisterFunction(round_floor_func);
 
-	ScalarFunction round_up_func("round_up", round_args, any_decimal,
-	                             DecimalRoundExecute<hugeint_t, UpRoundOp>, DecimalRoundBind<UpRoundOp>);
+	ScalarFunction round_up_func("round_up", round_args, any_decimal, DecimalRoundExecute<hugeint_t, UpRoundOp>,
+	                             DecimalRoundBind<UpRoundOp>);
 	loader.RegisterFunction(round_up_func);
 
-	ScalarFunction round_down_func("round_down", round_args, any_decimal,
-	                               DecimalRoundExecute<hugeint_t, DownRoundOp>, DecimalRoundBind<DownRoundOp>);
+	ScalarFunction round_down_func("round_down", round_args, any_decimal, DecimalRoundExecute<hugeint_t, DownRoundOp>,
+	                               DecimalRoundBind<DownRoundOp>);
 	loader.RegisterFunction(round_down_func);
 }
 
