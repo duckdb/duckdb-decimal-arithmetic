@@ -572,7 +572,7 @@ void DecimalArithmeticExtension::Load(ExtensionLoader &loader) {
 }
 
 std::string DecimalArithmeticExtension::Name() {
-	return "decimal_arithmetic";
+	return "decimal-arithmetic";
 }
 
 std::string DecimalArithmeticExtension::Version() const {
