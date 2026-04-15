@@ -7,12 +7,12 @@ Adds support for the following functions:
 ### `decimal_div(a DECIMAL, b DECIMAL) -> DECIMAL`
 
 Scalar division on `DECIMAL` that returns a `DECIMAL` result instead of casting to `DOUBLE`.
-Precision and scale follow SQL Server semantics. For `a / b` with input types `DECIMAL(p1, s1)` and `DECIMAL(p2, s2)`:
+Width and scale follow SQL Server semantics. For `a / b` with input types `DECIMAL(p1, s1)` and `DECIMAL(p2, s2)`:
 
 - Result scale: `max(6, s1 + p2 + 1)`
-- Result precision: `p1 - s1 + s2 + result_scale`
+- Result width: `p1 - s1 + s2 + result_scale`
 
-Both are capped at 38. If the computed precision exceeds 38, the scale is reduced by the excess (floored at 6) and precision is set to 38.
+Both are capped at 38. If the computed width exceeds 38, the scale is reduced by the excess (floored at 6) and width is set to 38.
 
 ### `decimal_avg(x DECIMAL) -> DECIMAL`
 
@@ -20,12 +20,12 @@ Aggregate average on `DECIMAL` that returns a `DECIMAL` result instead of castin
 Uses banker's rounding (round-half-to-even) when the exact average is not representable at the input scale.
 
 - Result scale: same as the input scale
-- Result precision: 38
+- Result width: same as the input width
 
 ### Rounding functions
 
 All rounding functions take `(value DECIMAL, scale INTEGER)` and return `DECIMAL` with the given scale.
-The `scale` argument must be a constant and cannot exceed the input scale (use an explicit cast to a higher-precision `DECIMAL` first if needed).
+The `scale` argument must be a constant and cannot exceed the input scale (use an explicit cast to a higher-width `DECIMAL` first if needed).
 
 | Function | Rounding mode |
 |---|---|

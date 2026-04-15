@@ -41,7 +41,7 @@ struct DecimalDivBindData : public FunctionData {
 // Intermediate arithmetic always happens in hugeint space to avoid overflow
 // regardless of how small the inputs are. The final quotient is then cast to
 // RESULT_TYPE, which matches the physical type of the result vector so that
-// smaller result precisions use cheaper INT32/INT64 storage.
+// smaller result widths use cheaper INT32/INT64 storage.
 //===--------------------------------------------------------------------===//
 
 template <class INPUT_TYPE, class RESULT_TYPE>
@@ -115,9 +115,9 @@ static scalar_function_t GetDecimalDivExecuteFunction(PhysicalType result_physic
 // Bind function
 //===--------------------------------------------------------------------===//
 
-// Result precision and scale for e1 / e2 (SQL Server semantics):
+// Result width and scale for e1 / e2 (SQL Server semantics):
 //   result_scale     = max(6, s1 + p2 + 1)
-//   result_precision = p1 - s1 + s2 + result_scale
+//   result_width = p1 - s1 + s2 + result_scale
 // Both are capped at Decimal::MAX_WIDTH_DECIMAL (38).
 static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFunction &bound_function,
                                                vector<unique_ptr<Expression>> &arguments) {
@@ -128,13 +128,13 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 	}
 
 	uint8_t result_scale = MaxValue<uint8_t>(6, s1 + p2 + 1);
-	uint8_t result_precision = p1 - s1 + s2 + result_scale;
+	uint8_t result_width = p1 - s1 + s2 + result_scale;
 
-	// Cap to the maximum representable decimal precision (38). When the
-	// formula yields a precision above 38 we reduce the scale by the same
+	// Cap to the maximum representable decimal width (38). When the
+	// formula yields a width above 38 we reduce the scale by the same
 	// amount so the integer part is preserved, then floor scale at 6.
-	if (result_precision > Decimal::MAX_WIDTH_DECIMAL) {
-		uint8_t excess = result_precision - Decimal::MAX_WIDTH_DECIMAL;
+	if (result_width > Decimal::MAX_WIDTH_DECIMAL) {
+		uint8_t excess = result_width - Decimal::MAX_WIDTH_DECIMAL;
 
 		// Guard against uint8_t underflow: excess can be larger than
 		// result_scale (e.g. p1=38,s1=0,s2=5 gives excess=26, scale=21).
@@ -145,27 +145,27 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 			result_scale = 0;
 		}
 		result_scale = MaxValue<uint8_t>(6, result_scale);
-		result_precision = Decimal::MAX_WIDTH_DECIMAL;
+		result_width = Decimal::MAX_WIDTH_DECIMAL;
 	}
 
-	// Determine the result physical type from result_precision so the result
+	// Determine the result physical type from result_width so the result
 	// vector uses the smallest sufficient storage type.
 	PhysicalType result_physical;
-	if (result_precision <= Decimal::MAX_WIDTH_INT16) {
+	if (result_width <= Decimal::MAX_WIDTH_INT16) {
 		result_physical = PhysicalType::INT16;
-	} else if (result_precision <= Decimal::MAX_WIDTH_INT32) {
+	} else if (result_width <= Decimal::MAX_WIDTH_INT32) {
 		result_physical = PhysicalType::INT32;
-	} else if (result_precision <= Decimal::MAX_WIDTH_INT64) {
+	} else if (result_width <= Decimal::MAX_WIDTH_INT64) {
 		result_physical = PhysicalType::INT64;
 	} else {
 		result_physical = PhysicalType::INT128;
 	}
 
-	bound_function.return_type = LogicalType::DECIMAL(result_precision, result_scale);
+	bound_function.return_type = LogicalType::DECIMAL(result_width, result_scale);
 
 	// Normalise both operands to the wider physical type so the execute
-	// function sees consistent physical types.  The max-precision value for
-	// each physical tier is used as the representative precision; scale is
+	// function sees consistent physical types.  The max-width value for
+	// each physical tier is used as the representative width; scale is
 	// preserved so no numeric value is lost during the cast.
 	auto lhs_physical = arguments[0]->return_type.InternalType();
 	auto rhs_physical = arguments[1]->return_type.InternalType();
@@ -505,7 +505,7 @@ static unique_ptr<FunctionData> DecimalRoundBind(ClientContext &context, ScalarF
 
 	if (target_scale > input_scale) {
 		throw NotImplementedException(
-		    "%s: target scale %d exceeds input scale %d; cast to a higher-precision DECIMAL first", bound_function.name,
+		    "%s: target scale %d exceeds input scale %d; cast to a higher-width DECIMAL first", bound_function.name,
 		    target_scale, input_scale);
 	}
 	// shift must fit in the POWERS_OF_TEN table (indices 0..38).

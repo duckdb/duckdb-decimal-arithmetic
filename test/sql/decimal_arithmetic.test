@@ -62,7 +62,7 @@ SELECT decimal_div(3::decimal(38,2), 16384::decimal(37,2));
 0.000183
 
 # INT16 inputs (p≤4) → DECIMAL(10, 7), INT64 result physical type
-# p1=4 s1=2 p2=4 s2=1: result_scale=max(6,2+4+1)=7, result_precision=4-2+1+7=10
+# p1=4 s1=2 p2=4 s2=1: result_scale=max(6,2+4+1)=7, result_width=4-2+1+7=10
 query I
 SELECT typeof(decimal_div(12.34::DECIMAL(4,2), 3.5::DECIMAL(4,1)));
 ----
@@ -74,7 +74,7 @@ SELECT decimal_div(12.34::DECIMAL(4,2), 3.5::DECIMAL(4,1));
 3.5257142
 
 # INT32 inputs (p≤9) → DECIMAL(18, 10), INT64 result physical type
-# p1=9 s1=3 p2=6 s2=2: result_scale=max(6,3+6+1)=10, result_precision=9-3+2+10=18
+# p1=9 s1=3 p2=6 s2=2: result_scale=max(6,3+6+1)=10, result_width=9-3+2+10=18
 query I
 SELECT typeof(decimal_div(1000.000::DECIMAL(9,3), 4.00::DECIMAL(6,2)));
 ----
@@ -86,7 +86,7 @@ SELECT decimal_div(1000.000::DECIMAL(9,3), 4.00::DECIMAL(6,2));
 250.0000000000
 
 # INT64 inputs (p≤18) → DECIMAL(31, 18), INT128 result physical type
-# p1=15 s1=5 p2=12 s2=3: result_scale=max(6,5+12+1)=18, result_precision=15-5+3+18=31
+# p1=15 s1=5 p2=12 s2=3: result_scale=max(6,5+12+1)=18, result_width=15-5+3+18=31
 query I
 SELECT typeof(decimal_div(100000.00000::DECIMAL(15,5), 8.000::DECIMAL(12,3)));
 ----
@@ -97,8 +97,8 @@ SELECT decimal_div(100000.00000::DECIMAL(15,5), 8.000::DECIMAL(12,3));
 ----
 12500.000000000000000000
 
-# INT128 inputs (p≤38), precision overflows → capped to DECIMAL(38, 13)
-# p1=28 s1=8 p2=20 s2=5: raw result_precision=54 → capped to 38, result_scale=29-(54-38)=13
+# INT128 inputs (p≤38), width overflows → capped to DECIMAL(38, 13)
+# p1=28 s1=8 p2=20 s2=5: raw result_width=54 → capped to 38, result_scale=29-(54-38)=13
 query I
 SELECT typeof(decimal_div(10000000000.00000000::DECIMAL(28,8), 4.00000::DECIMAL(20,5)));
 ----
