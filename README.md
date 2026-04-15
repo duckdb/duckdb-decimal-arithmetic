@@ -25,7 +25,7 @@ Uses banker's rounding (round-half-to-even) when the exact average is not repres
 ### Rounding functions
 
 All rounding functions take `(value DECIMAL, scale INTEGER)` and return `DECIMAL` with the given scale.
-The `scale` argument must be a constant and cannot exceed the input scale (use an explicit cast to a higher-width `DECIMAL` first if needed).
+The `scale` argument must be a constant and cannot exceed the input scale (use an explicit cast to a higher-scale `DECIMAL` first if needed).
 
 | Function | Rounding mode |
 |---|---|
