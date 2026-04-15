@@ -10,11 +10,11 @@ SELECT decimal_avg(1::BIGINT);
 ----
 decimal_avg requires a DECIMAL argument
 
-# Result type is always DECIMAL(38, scale_of_input)
+# Result type is always DECIMAL(width_of_input, scale_of_input)
 query I
 SELECT typeof(decimal_avg(v)) FROM (VALUES (1.00::DECIMAL(18,2)), (3.00::DECIMAL(18,2))) t(v);
 ----
-DECIMAL(38,2)
+DECIMAL(18,2)
 
 # Basic average — INT64 physical input type
 query I
@@ -58,19 +58,19 @@ SELECT decimal_avg(v) FROM (VALUES (-3.00::DECIMAL(18,2)), (1.00::DECIMAL(18,2))
 ----
 -1.00
 
-# INT16 physical input type (p≤4) — result is DECIMAL(38,2)
+# INT16 physical input type (p≤4) — result is DECIMAL(4,2)
 query I
 SELECT decimal_avg(v) FROM (VALUES (1.00::DECIMAL(4,2)), (3.00::DECIMAL(4,2))) t(v);
 ----
 2.00
 
-# INT32 physical input type (p≤9) — result is DECIMAL(38,3)
+# INT32 physical input type (p≤9) — result is DECIMAL(8,3)
 query I
 SELECT decimal_avg(v) FROM (VALUES (100.000::DECIMAL(8,3)), (200.000::DECIMAL(8,3))) t(v);
 ----
 150.000
 
-# INT128 physical input type (p>18) — result is DECIMAL(38,5)
+# INT128 physical input type (p>18) — result is DECIMAL(20,5)
 query I
 SELECT decimal_avg(v) FROM (VALUES (10.00000::DECIMAL(20,5)), (20.00000::DECIMAL(20,5))) t(v);
 ----
@@ -83,3 +83,36 @@ SELECT decimal_avg(v) FROM (
            (99999999999999999999999999999999999999::DECIMAL(38,0))) t(v);
 ----
 decimal_avg: intermediate sum overflowed HUGEINT range
+
+statement ok
+create or replace table foo as select range::decimal(4,3) as bar from range(10);
+
+query II
+SELECT typeof(decimal_avg(bar)), decimal_avg(bar) from foo;
+----
+DECIMAL(4,3)	4.500
+
+
+statement ok
+create or replace table foo as select range::decimal(10,3) as bar from range(10);
+
+query II
+SELECT typeof(decimal_avg(bar)), decimal_avg(bar) from foo;
+----
+DECIMAL(10,3)	4.500
+
+statement ok
+create or replace table foo as select range::decimal(18,3) as bar from range(10);
+
+query II
+SELECT typeof(decimal_avg(bar)), decimal_avg(bar) from foo;
+----
+DECIMAL(18,3)	4.500
+
+statement ok
+create or replace table foo as select range::decimal(38,3) as bar from range(10);
+
+query II
+SELECT typeof(decimal_avg(bar)), decimal_avg(bar) from foo;
+----
+DECIMAL(38,3)	4.500

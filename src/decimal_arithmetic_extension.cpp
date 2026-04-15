@@ -260,8 +260,17 @@ struct DecimalAvgOperation {
 		target.count += source.count;
 	}
 
+	static void AssignDecimalResult(hugeint_t &target, hugeint_t signed_q) {
+		target = signed_q;
+	}
+
+	template <class RESULT>
+	static void AssignDecimalResult(RESULT &target, hugeint_t signed_q) {
+		target = static_cast<RESULT>(signed_q.lower);
+	}
+
 	// Produce the final result.
-	// The return type is always DECIMAL(38, s) which is physically INT128,
+	// The return type is always DECIMAL(w, s) which is physically INT128,
 	// so the result target is hugeint_t.
 	// Must be a function template: called as OP::template Finalize<RESULT, STATE>(...).
 	template <class RESULT, class STATE>
@@ -289,16 +298,16 @@ struct DecimalAvgOperation {
 		if (round_up) {
 			q = q + hugeint_t(1);
 		}
-
-		target = negative ? -q : q;
+		hugeint_t signed_q = negative ? -q : q;
+		AssignDecimalResult(target, signed_q);
 	}
 };
 
 // Build the correctly-typed UnaryAggregate for a given input physical type.
-// The result is always DECIMAL(38, scale) = INT128-backed.
+// The result is always DECIMAL(width, scale) = INT128-backed.
 template <class INPUT_TYPE>
 static AggregateFunction MakeDecimalAvgFunction(const LogicalType &input_type, const LogicalType &return_type) {
-	return AggregateFunction::UnaryAggregate<DecimalAvgState, INPUT_TYPE, hugeint_t, DecimalAvgOperation<INPUT_TYPE>>(
+	return AggregateFunction::UnaryAggregate<DecimalAvgState, INPUT_TYPE, INPUT_TYPE, DecimalAvgOperation<INPUT_TYPE>>(
 	    input_type, return_type);
 }
 
@@ -321,8 +330,9 @@ static unique_ptr<FunctionData> BindDecimalAvg(ClientContext &, AggregateFunctio
 		                            input_type.ToString());
 	}
 
+	uint8_t width = DecimalType::GetWidth(input_type);
 	uint8_t scale = DecimalType::GetScale(input_type);
-	auto return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, scale);
+	auto return_type = LogicalType::DECIMAL(width, scale);
 
 	switch (input_type.InternalType()) {
 	case PhysicalType::INT16:
