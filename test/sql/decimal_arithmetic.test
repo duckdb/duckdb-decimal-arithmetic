@@ -108,3 +108,38 @@ query I
 SELECT decimal_div(10000000000.00000000::DECIMAL(28,8), 4.00000::DECIMAL(20,5));
 ----
 2500000000.0000000000000
+
+# INTEGER inputs require DECIMAL(10,0) casts. This used to choose DECIMAL(9,0)
+# from the INT32 physical type and fail near the INTEGER max value.
+statement ok
+CREATE TABLE decimal_div_int32_input (col1 INTEGER, col2 INTEGER);
+
+statement ok
+INSERT INTO decimal_div_int32_input VALUES (2147483647, 999);
+
+query I
+SELECT typeof(decimal_div(col1, col2)) FROM decimal_div_int32_input;
+----
+DECIMAL(21,11)
+
+query I
+SELECT decimal_div(col1, col2) FROM decimal_div_int32_input;
+----
+2149633.28028028028
+
+# SMALLINT inputs similarly require DECIMAL(5,0), not DECIMAL(4,0).
+statement ok
+CREATE TABLE decimal_div_int16_input (col1 SMALLINT, col2 SMALLINT);
+
+statement ok
+INSERT INTO decimal_div_int16_input VALUES (32767, 999);
+
+query I
+SELECT typeof(decimal_div(col1, col2)) FROM decimal_div_int16_input;
+----
+DECIMAL(11,6)
+
+query I
+SELECT decimal_div(col1, col2) FROM decimal_div_int16_input;
+----
+32.799799
