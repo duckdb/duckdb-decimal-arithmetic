@@ -111,6 +111,19 @@ static scalar_function_t GetDecimalDivExecuteFunction(PhysicalType result_physic
 	}
 }
 
+static PhysicalType DecimalPhysicalTypeForWidth(uint8_t width) {
+	if (width <= Decimal::MAX_WIDTH_INT16) {
+		return PhysicalType::INT16;
+	}
+	if (width <= Decimal::MAX_WIDTH_INT32) {
+		return PhysicalType::INT32;
+	}
+	if (width <= Decimal::MAX_WIDTH_INT64) {
+		return PhysicalType::INT64;
+	}
+	return PhysicalType::INT128;
+}
+
 //===--------------------------------------------------------------------===//
 // Bind function
 //===--------------------------------------------------------------------===//
@@ -150,25 +163,16 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 
 	// Determine the result physical type from result_width so the result
 	// vector uses the smallest sufficient storage type.
-	PhysicalType result_physical;
-	if (result_width <= Decimal::MAX_WIDTH_INT16) {
-		result_physical = PhysicalType::INT16;
-	} else if (result_width <= Decimal::MAX_WIDTH_INT32) {
-		result_physical = PhysicalType::INT32;
-	} else if (result_width <= Decimal::MAX_WIDTH_INT64) {
-		result_physical = PhysicalType::INT64;
-	} else {
-		result_physical = PhysicalType::INT128;
-	}
+	PhysicalType result_physical = DecimalPhysicalTypeForWidth(result_width);
 
 	bound_function.return_type = LogicalType::DECIMAL(result_width, result_scale);
 
 	// Normalise both operands to the wider physical type so the execute
-	// function sees consistent physical types.  The max-width value for
-	// each physical tier is used as the representative width; scale is
-	// preserved so no numeric value is lost during the cast.
-	auto lhs_physical = arguments[0]->return_type.InternalType();
-	auto rhs_physical = arguments[1]->return_type.InternalType();
+	// function sees consistent physical types. Base integer inputs can require
+	// a wider decimal tier than their native physical type (e.g. INTEGER needs
+	// DECIMAL(10,0), not DECIMAL(9,0)), so select the tier from decimal width.
+	auto lhs_physical = DecimalPhysicalTypeForWidth(p1);
+	auto rhs_physical = DecimalPhysicalTypeForWidth(p2);
 	auto wider = MaxValue<PhysicalType>(lhs_physical, rhs_physical);
 
 	switch (wider) {
