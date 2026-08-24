@@ -22,16 +22,20 @@ struct DecimalDivBindData : public FunctionData {
 	//   result_int = (a_int * 10^scale_exp) / b_int
 	// where scale_exp = s2 + result_scale - s1
 	uint8_t scale_exp;
+	// Declared width of the result. The quotient must stay below
+	// 10^result_width to be representable in it.
+	uint8_t result_width;
 
-	explicit DecimalDivBindData(uint8_t scale_exp) : scale_exp(scale_exp) {
+	DecimalDivBindData(uint8_t scale_exp, uint8_t result_width) : scale_exp(scale_exp), result_width(result_width) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<DecimalDivBindData>(scale_exp);
+		return make_uniq<DecimalDivBindData>(scale_exp, result_width);
 	}
 
 	bool Equals(const FunctionData &other) const override {
-		return scale_exp == other.Cast<DecimalDivBindData>().scale_exp;
+		auto &other_data = other.Cast<DecimalDivBindData>();
+		return scale_exp == other_data.scale_exp && result_width == other_data.result_width;
 	}
 };
 
@@ -50,6 +54,8 @@ static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &r
 	auto &bind_data = func_expr.bind_info->Cast<DecimalDivBindData>();
 
 	hugeint_t scale_factor = Hugeint::POWERS_OF_TEN[bind_data.scale_exp];
+	// A quotient at or above this does not fit the declared result type.
+	hugeint_t result_limit = Hugeint::POWERS_OF_TEN[bind_data.result_width];
 
 	BinaryExecutor::Execute<INPUT_TYPE, INPUT_TYPE, RESULT_TYPE>(
 	    args.data[0], args.data[1], result, args.size(), [&](INPUT_TYPE a, INPUT_TYPE b) -> RESULT_TYPE {
@@ -57,7 +63,15 @@ static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &r
 			    throw InvalidInputException("decimal_div: division by zero");
 		    }
 
-		    hugeint_t numerator = hugeint_t(a) * scale_factor;
+		    // Scaling the numerator can exceed hugeint even when the quotient
+		    // itself would fit, so the multiplication is checked rather than
+		    // allowed to wrap.
+		    hugeint_t numerator;
+		    if (!Hugeint::TryMultiply(hugeint_t(a), scale_factor, numerator)) {
+			    throw OutOfRangeException(
+			        "decimal_div: intermediate result out of range while dividing into DECIMAL(%d)",
+			        static_cast<int>(bind_data.result_width));
+		    }
 		    hugeint_t divisor = hugeint_t(b);
 
 		    // Work with absolute values so the rounding logic is sign-agnostic.
@@ -88,6 +102,13 @@ static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &r
 		    // }
 
 		    hugeint_t final_val = negative ? -q : q;
+		    // TryCast only bounds the value by its storage type, which for a
+		    // width of 38 is hugeint and so admits values wider than the
+		    // declared type.
+		    if (final_val <= -result_limit || final_val >= result_limit) {
+			    throw OutOfRangeException("decimal_div: result out of range for DECIMAL(%d)",
+			                              static_cast<int>(bind_data.result_width));
+		    }
 		    RESULT_TYPE out;
 		    if (!Hugeint::TryCast(final_val, out)) {
 			    throw OutOfRangeException("decimal_div: result out of range for result type");
@@ -200,8 +221,22 @@ static unique_ptr<FunctionData> DecimalDivBind(ClientContext &context, ScalarFun
 		throw InternalException("decimal_div: unexpected physical type");
 	}
 
-	uint8_t scale_exp = s2 + result_scale - s1;
-	return make_uniq<DecimalDivBindData>(scale_exp);
+	// The numerator is scaled by 10^scale_exp before the division, so the
+	// exponent has to be a power of ten hugeint can hold. A larger one cannot
+	// be represented at all, and indexing POWERS_OF_TEN with it would read past
+	// the table and silently return a wrong quotient. Computing these
+	// accurately needs the scaling and division interleaved, which this
+	// implementation does not do, so refuse the bind instead.
+	auto scale_exp = static_cast<int32_t>(s2) + static_cast<int32_t>(result_scale) - static_cast<int32_t>(s1);
+	if (scale_exp >= Hugeint::CACHED_POWERS_OF_TEN) {
+		throw OutOfRangeException(
+		    "Needed a scale factor of 10^%d to accurately represent the division of DECIMAL(%d,%d) by "
+		    "DECIMAL(%d,%d), but the maximum is 10^%d. Either add a cast to DOUBLE, or add an explicit cast to "
+		    "a decimal with a lower scale.",
+		    scale_exp, static_cast<int>(p1), static_cast<int>(s1), static_cast<int>(p2), static_cast<int>(s2),
+		    static_cast<int>(Hugeint::CACHED_POWERS_OF_TEN) - 1);
+	}
+	return make_uniq<DecimalDivBindData>(static_cast<uint8_t>(scale_exp), result_width);
 }
 
 //===--------------------------------------------------------------------===//
