@@ -143,3 +143,38 @@ query I
 SELECT decimal_div(col1, col2) FROM decimal_div_int16_input;
 ----
 32.799799
+
+# A quotient wider than the declared result type is rejected rather than
+# returned. DECIMAL(33,0) / DECIMAL(1,0) resolves to DECIMAL(38,6), which leaves
+# 32 digits for the integer part, and this quotient needs 33.
+statement error
+SELECT decimal_div(100000000000000000000000000000000::DECIMAL(33,0), 1::DECIMAL(1,0));
+----
+decimal_div: result out of range for DECIMAL(38)
+
+# One digit narrower stays inside the declared type
+query I
+SELECT decimal_div(10000000000000000000000000000000::DECIMAL(33,0), 1::DECIMAL(1,0));
+----
+10000000000000000000000000000000.000000
+
+# Scaling the numerator can exceed hugeint even where the quotient itself would
+# fit
+statement error
+SELECT decimal_div(200000000000000000000000000000000::DECIMAL(34,0), 1::DECIMAL(1,0));
+----
+decimal_div: intermediate result out of range while dividing into DECIMAL(38)
+
+# A divisor whose scale far exceeds the dividend's needs a scale factor above
+# 10^38, which cannot be represented
+statement error
+SELECT decimal_div(1::DECIMAL(1,0), 0.1::DECIMAL(38,38));
+----
+Needed a scale factor of 10^44 to accurately represent the division of DECIMAL(1,0) by DECIMAL(38,38)
+
+# The largest divisor scale that still resolves, for contrast with the case
+# above
+query I
+SELECT decimal_div(1::DECIMAL(1,0), 0.1::DECIMAL(32,32));
+----
+10.000000
